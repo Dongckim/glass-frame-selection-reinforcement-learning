@@ -1,0 +1,219 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+%
+\documentclass[
+  11pt,
+]{article}
+\usepackage{amsmath,amssymb}
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\usepackage{xcolor}
+\usepackage[margin=0.8in]{geometry}
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\ifLuaTeX
+  \usepackage{selnolig}  % disable illegal ligatures
+\fi
+\IfFileExists{bookmark.sty}{\usepackage{bookmark}}{\usepackage{hyperref}}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  pdftitle={Question Conditioned Online Frame Selection for Smart Glasses},
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\title{Question Conditioned Online Frame Selection for Smart Glasses}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+IE 598 Final Project Proposal \textbar{} Reinforcement learning under a
+frame transmission budget
+
+\section{Objective}
+
+Smart glasses cannot transmit every video frame, and head motion often
+blurs the frames they do send. We will learn a policy that decides, frame
+by frame, whether to transmit so that a vision--language model (VLM) can
+answer a question given before the video starts, using at most $B$
+frames. Decisions are causal and irreversible: a skipped frame cannot be
+recovered. The server keeps all transmitted frames in temporal order.
+
+\section{Problem formulation}
+
+An episode consists of a question $Q$, a video with $T$ frames,
+synchronized IMU measurements, and a reference answer $g$. The clip
+length $T$ is not known to the policy in advance. At each time
+$t$, the policy chooses $a_t\in\{\mathrm{Transmit},\mathrm{Wait}\}$.
+Let $S_t$ be the set of frames transmitted before $t$ ($S_1=\varnothing$)
+and $b_t$ the remaining budget:
+\[
+S_{t+1}=\begin{cases}S_t\cup\{t\},&a_t=\mathrm{Transmit},\\S_t,&a_t=\mathrm{Wait},\end{cases}
+\qquad
+\sum_{t=1}^{T}\mathbf{1}\{a_t=\mathrm{Transmit}\}\le B .
+\]
+The task objective is the QA accuracy
+$\mathbb{E}[\mathbf{1}\{M(Q,F(S))=g\}]$, where $S=S_{T+1}$, $M$ is a
+fixed VLM, and $F(S)$ denotes the selected frames in temporal order.
+This objective is too expensive to use as a training signal, so the
+MDP we solve instead maximizes a cheap surrogate return (defined
+below); QA accuracy is the target this surrogate approximates and
+is used for evaluation. Frame count serves as the transmission cost.
+
+\textbf{State and observation.} Transmission decisions do not affect the
+recorded video, so we define the full state as
+$x_t=(V,Q,g,\{I_j\},t,S_t,b_t)$, where $V$ is the entire video and IMU
+stream (which also determines $T$) and $\{I_j\}$ are the evidence
+intervals (defined below). The transition is deterministic, the episode
+ends when the video ends, and all randomness enters through the initial
+state
+$x_1\sim P_{x_1}$, the distribution of recorded episodes. Thus $x_t$ is
+Markov by construction, and the reward is a function of $(x_t,a_t)$.
+The policy, however, observes only a causal function of $x_t$:
+\[
+y_t=(z_Q,\,z_t,\,q_t,\,m_t,\,h_t,\,b_t,\,t),
+\]
+where $z_Q$ is a question embedding, $z_t$ features of the current frame
+from a lightweight on-device image encoder, $q_t$ its sharpness, $m_t$ a recent IMU summary, and $h_t$ a summary of
+past observations and selections; the elapsed time $t$ is observed,
+but the remaining time is not. The problem is therefore a POMDP, and
+$h_t$ approximates the belief over episodes given the history.
+
+\section{Learning approach and rewards}
+
+The policy is meant to run on the glasses, so every input in $y_t$
+comes from cheap computation: a lightweight frozen image encoder for
+$z_t$, image sharpness, IMU summaries, and a question embedding $z_Q$
+computed once before the video starts. Rewards and the VLM are used
+only on the server, for training and evaluation respectively. All
+experiments simulate this setting offline on recorded clips, with
+features computed once and cached. On these features we train a small
+policy network with deep RL (DQN or actor--critic), replaying each
+training clip frame by frame so that the policy never sees future
+frames. Querying the VLM at the end of every training episode would be
+too expensive, so the policy is trained with one of two cheap surrogate
+reward functions $r_t(x_t,a_t)$ defined below, maximizing the
+undiscounted return $\mathbb{E}\bigl[\sum_{t=1}^{T}r_t\bigr]$. The
+fixed VLM $M$ is used only for evaluation on held-out clips. Both
+rewards are zero when $a_t=\mathrm{Wait}$; below we give $r_t$ for
+$a_t=\mathrm{Transmit}$, with sharpness $q_t\in[0,1]$.
+
+\textbf{Evidence-based reward.} We annotate intervals
+$I_1,\ldots,I_m$ that contain the required visual evidence. Let
+$\bar q_{t,j}=\max\bigl(\{q_i:i\in S_t\cap I_j\}\cup\{0\}\bigr)$ be the
+best sharpness already captured in $I_j$. Then
+\[
+r_t=\frac{1}{m}\sum_{j:\,t\in I_j}\bigl(q_t-\bar q_{t,j}\bigr)^{+},
+\]
+so a frame earns reward only if it improves the evidence already
+collected. The return equals
+$\frac{1}{m}\sum_{j}\max\bigl(\{q_i:i\in S\cap I_j\}\cup\{0\}\bigr)$,
+the average best sharpness per evidence interval. Annotations are used
+only for rewards and evaluation, never as inputs.
+
+\textbf{CLIP-based reward.} A large frozen image--text encoder
+\cite{clip}, used only on the server and distinct from the on-device
+encoder, gives relevance
+$c_t=\max\bigl(0,\cos(e_t,E_{\mathrm{text}}(Q))\bigr)$ with
+$e_t=E_{\mathrm{image}}(f_t)$. To discourage redundant frames, the
+reward is discounted by similarity to frames already sent:
+\[
+r_t=\frac{1}{B}\,q_t c_t\Bigl(1-\max\bigl(\{\cos(e_t,e_i):i\in S_t\}\cup\{0\}\bigr)\Bigr).
+\]
+This requires no annotation. As with the evidence-based reward, $r_t$
+depends on $S_t$, which is part of $x_t$.
+
+\section{Data}
+
+We will record up to 200 first-person clips of 30--60 seconds with
+synchronized video and IMU, covering object manipulation, object
+relocation, and short action sequences under varied head motion. Each
+clip has at least one multiple-choice question. Budgets are 3--5
+frames. Data are split 60/20/20 by recording session, keeping all
+questions from one recording together. Because the environment is the
+unknown episode distribution $P_{x_1}$ and training clips are replayed
+many times, performance on training clips overstates generalization;
+validation clips are used for model selection and test clips only for
+final evaluation.
+
+\section{Evaluation}
+
+Baselines are fixed-interval sampling, causal sharpness and
+IMU-assisted thresholds, and a causal question-relevance threshold.
+Checkpoints and baseline thresholds are selected by surrogate return on
+validation clips. We also ablate the IMU and the question embedding.
+For every method, the selected test frames are fed to the fixed VLM
+under a common budget and resolution, and we report QA accuracy,
+averaged over training seeds. Comparing policies trained with the two
+rewards shows which surrogate better serves the downstream task.
+
+\section{Related work and contribution}
+
+RL-based frame selection for video understanding \cite{qin} and
+lightweight selectors for frozen VLMs \cite{hornet} already exist, so
+question-conditioned selection is not itself our novelty. AdaFrame
+\cite{adaframe} learns adaptive frame selection for recognition, and
+Koschel et al.\ \cite{koschel} use inertial data for real-time keyframe
+selection. Our contribution is a controlled study of irreversible,
+budgeted selection on smart glasses: whether question conditioning and
+IMU information help, and which surrogate reward better improves QA
+accuracy.
+
+\begin{thebibliography}{9}
+\bibitem{qin} Y. Qin, H. Li, W. Mu, and Y. He. ``Efficient Frame Selection for
+Long Video Understanding via Reinforcement Learning.'' CVPR, pp.
+16944--16953, 2026.
+\href{https://openaccess.thecvf.com/content/CVPR2026/html/Qin_Efficient_Frame_Selection_for_Long_Video_Understanding_via_Reinforcement_Learning_CVPR_2026_paper.html}{Paper}
+
+\bibitem{hornet} X. Bai, B. Galoaa, and S. Ostadabbas. ``HORNet: Task-Guided
+Frame Selection for Video Question Answering with Vision-Language
+Models.'' CVPR Workshops, pp. 8755--8764, 2026.
+\href{https://openaccess.thecvf.com/content/CVPR2026W/CV4Smalls/html/Bai_HORNet_Task-Guided_Frame_Selection_for_Video_Question_Answering_with_Vision-Language_CVPRW_2026_paper.html}{Paper}
+
+\bibitem{clip} A. Radford et al. ``Learning Transferable Visual Models From
+Natural Language Supervision.'' ICML, PMLR 139, pp. 8748--8763, 2021.
+\href{https://proceedings.mlr.press/v139/radford21a.html}{Paper}
+
+\bibitem{koschel} A. Koschel, C. Müller, and A. Reiterer. ``Selection of Key
+Frames for 3D Reconstruction in Real Time.'' Algorithms, 14(11), 303,
+2021. \href{https://www.mdpi.com/1999-4893/14/11/303}{Paper}
+
+\bibitem{adaframe} Z. Wu, C. Xiong, C.-Y. Ma, R. Socher, and L. S. Davis.
+``AdaFrame: Adaptive Frame Selection for Fast Video Recognition.'' CVPR,
+2019.
+\href{https://openaccess.thecvf.com/content_CVPR_2019/html/Wu_AdaFrame_Adaptive_Frame_Selection_for_Fast_Video_Recognition_CVPR_2019_paper.html}{Paper}
+\end{thebibliography}
+\end{document}

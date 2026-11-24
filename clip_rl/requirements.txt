@@ -1,0 +1,5 @@
+numpy
+open_clip_torch
+Pillow
+torch>=2.5
+torchvision
